@@ -377,6 +377,11 @@ html, body { height:100%; background:#0d1a10; }
   width:100%;
 }
 .meal-plan-grid { display:grid; grid-template-columns:repeat(7,1fr); gap:5px; margin-bottom:14px; }
+.meal-day { border-radius:10px; padding:5px 3px; text-align:center; cursor:pointer; min-height:90px; background:var(--sf); border:1px solid var(--bd); display:flex; flex-direction:column; gap:3px; transition:background .2s; }
+.meal-day-name { font-size:11px; font-weight:600; color:var(--t2); margin-bottom:2px; }
+.meal-slot { border-radius:6px; padding:3px 2px; font-size:9px; line-height:1.3; min-height:22px; display:flex; align-items:center; justify-content:center; text-align:center; cursor:pointer; }
+.meal-slot-empty { background:var(--ac); color:var(--t2); border:1px dashed var(--bd); }
+.meal-slot-filled { background:var(--ap); color:#fff; font-weight:500; }
 .meal-day {
   background:var(--sf); border:1px solid var(--bd); border-radius:10px;
   padding:6px 4px; text-align:center; cursor:pointer; transition:all .2s;
@@ -1836,7 +1841,20 @@ const DEFAULT_PANTRY = [
   {id:4,name:'Kaffee',stock:'empty',unit:'Pack'},
   {id:5,name:'Mehl',stock:'mid',unit:'kg'},
 ];
-const DEFAULT_MEALPLAN = {Mo:null,Di:null,Mi:null,Do:null,Fr:null,Sa:null,So:null};
+const DEFAULT_MEALPLAN = {
+  Mo:{fr:null,mi:null,ab:null},
+  Di:{fr:null,mi:null,ab:null},
+  Mi:{fr:null,mi:null,ab:null},
+  Do:{fr:null,mi:null,ab:null},
+  Fr:{fr:null,mi:null,ab:null},
+  Sa:{fr:null,mi:null,ab:null},
+  So:{fr:null,mi:null,ab:null}
+};
+const MEAL_SLOTS = [
+  {id:'fr', icon:'🌅', label:'Frühstück'},
+  {id:'mi', icon:'☀️', label:'Mittagessen'},
+  {id:'ab', icon:'🌙', label:'Abendessen'},
+];
 const DEFAULT_RECIPES = [
   {id:1,title:'Spaghetti Bolognese',time:'40 min',persons:4,tags:['Pasta','Fleisch'],
    ingredients:['500g Hackfleisch','400g Spaghetti','2 Zwiebeln','3 Knoblauchzehen','400g Tomaten','2 EL Olivenöl','Salz, Pfeffer'],
@@ -1881,7 +1899,20 @@ let S = saved ? {...DEFAULT_STATE, ...saved.S, modal:{storeId:null,prodId:null,u
 let F = saved ? {...DEFAULT_FEATURES, ...saved.F} : {...DEFAULT_FEATURES};
 let PANTRY = saved?.PANTRY ?? DEFAULT_PANTRY.map(p=>({...p}));
 let RECIPES = saved?.RECIPES?.length ? saved.RECIPES : DEFAULT_RECIPES.map(r=>({...r}));
-let mealPlan = saved?.mealPlan ?? {...DEFAULT_MEALPLAN};
+let mealPlan = (()=>{
+  const raw = saved?.mealPlan;
+  if(!raw) return {...DEFAULT_MEALPLAN};
+  // Migrate old single-id format to new slot format
+  const result = {};
+  for(const day of ['Mo','Di','Mi','Do','Fr','Sa','So']){
+    if(raw[day] && typeof raw[day] === 'object' && ('fr' in raw[day] || 'mi' in raw[day] || 'ab' in raw[day])){
+      result[day] = raw[day]; // Already new format
+    } else {
+      result[day] = {fr:null, mi: raw[day]||null, ab:null}; // Migrate old to Mittagessen
+    }
+  }
+  return result;
+})();
 
 // Auto-save bei jeder Änderung (debounced)
 function scheduleSave() {
@@ -2637,20 +2668,22 @@ function renderPantry(){
   }).join('');
   container.innerHTML = html;
 
-  // Auto-add low/empty items if toggle is ON
+  // Auto-add low/empty items wenn Toggle AN ist
   if(S.pantryAutoList !== false){
     alerts.forEach(p=>{
       const alreadyIn = S.stores.some(s=>s.products.find(x=>x.name===p.name&&!x.done));
-      if(alreadyIn) return; // skip if already on list
+      if(alreadyIn) return;
       const defaultStore = p.defaultStore ? S.stores.find(s=>s.id===p.defaultStore) : null;
       if(defaultStore){
-        // Silently add to default store without toast
+        // Standard-Geschäft bekannt → direkt still hinzufügen
         const acMatch = AC_DB.find(a=>a.name.toLowerCase()===p.name.toLowerCase());
         const nid = Math.max(0,...S.stores.flatMap(x=>x.products.map(q=>q.id)),0)+1;
         defaultStore.products.push({id:nid,name:p.name,done:false,qty:1,unit:acMatch?acMatch.unit:'Stk',price:0,abt:'',tags:[]});
         defaultStore.open = true;
+      } else {
+        // Kein Standard-Geschäft → Nutzer fragen
+        showPantryStorePicker(p.name, p);
       }
-      // If no default store: don't auto-add, wait for manual click
     });
   }
 }
@@ -2697,39 +2730,113 @@ function addPantryToList(pantryId){
 }
 
 function showPantryStorePicker(name, pantryItem){
+  // Nur ein Picker gleichzeitig — aber nicht überschreiben wenn schon offen für anderes Produkt
   const existing = document.getElementById('modal-pantry-store-picker');
-  if(existing) existing.remove();
+  if(existing){
+    // Bereits ein Picker offen — als Queue: kurz warten und nochmal versuchen
+    setTimeout(()=>showPantryStorePicker(name, pantryItem), 800);
+    return;
+  }
+
   const ov = document.createElement('div');
   ov.id = 'modal-pantry-store-picker';
   ov.className = 'ov open';
   const safeName = name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+
   const storeButtons = S.stores.map(s=>
-    '<button onclick="doAddPantryToStore(\''+safeName+'\','+s.id+',null);document.getElementById(\'modal-pantry-store-picker\').remove();" style="width:100%;text-align:left;padding:12px 14px;margin-bottom:6px;border:1px solid var(--bd);background:transparent;border-radius:12px;cursor:pointer;font-family:var(--fn);font-size:13px;color:var(--tx);display:flex;align-items:center;gap:10px;">'+
-    '<span style="font-size:18px;">🏪</span><span style="flex:1;">'+s.name+'</span></button>'
+    '<button onclick="doAddPantryToStore(\''+safeName+'\','+s.id+',null)" '+
+    'style="width:100%;text-align:left;padding:12px 14px;margin-bottom:6px;'+
+    'border:1px solid var(--bd);background:var(--sf-solid);border-radius:12px;cursor:pointer;'+
+    'font-family:var(--fn);font-size:13px;color:var(--tx);display:flex;align-items:center;gap:10px;">'+
+    '<span style="font-size:20px;">🏪</span>'+
+    '<span style="flex:1;">'+s.name+'</span>'+
+    '<span style="font-size:11px;color:var(--t2);">→</span>'+
+    '</button>'
   ).join('');
+
   ov.innerHTML = '<div class="modal" style="padding-bottom:20px;">'+
-    '<h3 style="margin-bottom:6px;">🛒 '+name+'</h3>'+
+    '<h3 style="margin-bottom:4px;">🛒 '+name+'</h3>'+
     '<p style="font-size:12px;color:var(--t2);margin-bottom:14px;">In welchem Geschäft kaufst du das?</p>'+
     storeButtons+
-    '<p style="font-size:11px;color:var(--t2);margin:8px 0;text-align:center;">💡 Standard-Geschäft im Vorrat hinterlegen → nie mehr fragen!</p>'+
-    '<button class="mcanc" onclick="document.getElementById(\'modal-pantry-store-picker\').remove()">Abbrechen</button>'+
-    '</div>';
-  ov.addEventListener('click',function(e){if(e.target===this)this.remove();});
+
+    // ── Neues Geschäft direkt hier erstellen ──
+    '<div id="new-store-from-picker" style="margin-top:10px;">'+
+      '<button onclick="toggleNewStoreInPicker()" '+
+        'style="width:100%;padding:10px 14px;border:1.5px dashed var(--bd);background:transparent;'+
+        'border-radius:12px;cursor:pointer;font-family:var(--fn);font-size:12px;color:var(--ap);'+
+        'display:flex;align-items:center;gap:8px;justify-content:center;">'+
+        '＋ Neues Geschäft hinzufügen'+
+      '</button>'+
+      '<div id="new-store-picker-form" style="display:none;margin-top:8px;'+
+        'background:var(--ac);border:1px solid var(--bd);border-radius:12px;padding:12px;">'+
+        '<div style="font-size:12px;color:var(--t2);margin-bottom:6px;">Name des Geschäfts:</div>'+
+        '<div style="display:flex;gap:8px;">'+
+          '<input id="new-store-picker-inp" class="add-inp" placeholder="z.B. Aldi, Rewe, Bio-Markt…" '+
+            'onkeydown="if(event.key===\'Enter\')createStoreFromPicker(\''+safeName+'\')" '+
+            'style="flex:1;">'+
+          '<button onclick="createStoreFromPicker(\''+safeName+'\')" class="add-btn" style="padding:8px 14px;flex-shrink:0;">✓</button>'+
+        '</div>'+
+      '</div>'+
+    '</div>'+
+
+    '<p style="font-size:10px;color:var(--t2);margin-top:10px;text-align:center;">'+
+      '💡 Standard-Geschäft im Vorrat hinterlegen → nie mehr fragen'+
+    '</p>'+
+    '<button class="mcanc" onclick="document.getElementById(\'modal-pantry-store-picker\').remove()">'+
+      'Abbrechen'+
+    '</button>'+
+  '</div>';
+
+  ov.addEventListener('click', function(e){ if(e.target===this) this.remove(); });
   document.body.appendChild(ov);
 }
 
+function toggleNewStoreInPicker(){
+  const form = document.getElementById('new-store-picker-form');
+  if(!form) return;
+  const visible = form.style.display !== 'none';
+  form.style.display = visible ? 'none' : 'block';
+  if(!visible) setTimeout(()=>document.getElementById('new-store-picker-inp')?.focus(), 50);
+}
+
+function createStoreFromPicker(productName){
+  const inp = document.getElementById('new-store-picker-inp');
+  const storeName = inp ? inp.value.trim() : '';
+  if(!storeName){ showToast('Bitte Geschäftsname eingeben', true); return; }
+
+  // Neues Geschäft erstellen
+  const nid = Math.max(0,...S.stores.map(s=>s.id),0)+1;
+  S.stores.push({id:nid, name:storeName, open:true, products:[], budget:0});
+
+  // Produkt direkt in das neue Geschäft legen
+  doAddPantryToStore(productName, nid, PANTRY.find(x=>x.name===productName));
+}
+
 function doAddPantryToStore(name, storeId, pantryItem){
+  // Picker schließen
+  const picker = document.getElementById('modal-pantry-store-picker');
+  if(picker) picker.remove();
+
   const store = S.stores.find(x=>x.id===storeId);
   if(!store){ showToast('Geschäft nicht gefunden', true); return; }
+
+  // Prüfen ob schon auf der Liste
+  if(store.products.find(p=>p.name===name&&!p.done)){
+    showToast('"'+name+'" ist bereits bei '+store.name+' auf der Liste', true);
+    return;
+  }
+
   const acMatch = AC_DB.find(p=>p.name.toLowerCase()===name.toLowerCase());
   const nid = Math.max(0,...S.stores.flatMap(x=>x.products.map(p=>p.id)),0)+1;
-  store.products.push({id:nid,name,done:false,qty:1,unit:acMatch?acMatch.unit:'Stk',price:0,abt:'',tags:[]});
-  // Remember store for next time
+  store.products.push({id:nid, name, done:false, qty:1, unit:acMatch?acMatch.unit:'Stk', price:0, abt:'', tags:[]});
+
+  // Standard-Geschäft merken
   const pi = pantryItem || PANTRY.find(x=>x.name===name);
-  if(pi && !pi.defaultStore){ pi.defaultStore=storeId; }
-  store.open=true;
-  renderStores();renderPantry();
-  showScreen('list');
+  if(pi && !pi.defaultStore){ pi.defaultStore = storeId; }
+
+  store.open = true;
+  renderStores();
+  renderPantry();
   scheduleSave();
   showToast('✓ "'+name+'" zu '+store.name+' hinzugefügt');
 }
@@ -2944,16 +3051,17 @@ function renderRecipes(){
     }
   }
 
-  // Meal plan grid
+  // Meal plan grid — 3 Mahlzeiten pro Tag
   document.getElementById('meal-plan-grid').innerHTML = WEEKDAYS.map(d=>{
-    const meal=mealPlan[d];
-    const recipe=meal?RECIPES.find(r=>r.id===meal):null;
-    return`<div class="meal-day${recipe?' has-meal':''}" onclick="assignMeal('${d}')">
-      <div class="meal-day-name">${d}</div>
-      ${recipe
-        ? '<div class="meal-day-content">'+recipe.title.split(' ').slice(0,2).join(' ')+'</div>'
-        : '<div class="meal-day-empty">+</div>'}
-    </div>`;
+    const dayPlan = mealPlan[d] || {fr:null,mi:null,ab:null};
+    const slots = MEAL_SLOTS.map(function(slot){
+      const rid = dayPlan[slot.id];
+      const r = rid ? RECIPES.find(function(x){return x.id===rid;}) : null;
+      const label = r ? r.title.split(' ').slice(0,2).join(' ') : slot.icon;
+      const cls = r ? 'meal-slot meal-slot-filled' : 'meal-slot meal-slot-empty';
+      return '<div class="'+cls+'" onclick="event.stopPropagation();assignMeal(this.dataset.d,this.dataset.s)" data-d="'+d+'" data-s="'+slot.id+'" title="'+slot.label+': '+(r?r.title:'leer')+'">'+label+'</div>';
+    }).join('');
+    return '<div class="meal-day"><div class="meal-day-name">'+d+'</div>'+slots+'</div>';
   }).join('');
 
   // Recipe cards (filtered)
@@ -2974,6 +3082,7 @@ function renderRecipes(){
         <span style="font-size:11px;color:var(--t2);">⏱ ${r.time} · 👤 ${r.persons} Pers.</span>
       </div>
       <div style="display:flex;gap:4px;flex-shrink:0;">
+        <button onclick="assignRecipeToDay(${r.id})" style="background:none;border:1px solid var(--bd);border-radius:8px;padding:4px 7px;cursor:pointer;font-size:13px;" title="Zum Wochenplan hinzufügen">📅</button>
         <button onclick="shareRecipe(${r.id})" style="background:none;border:1px solid var(--bd);border-radius:8px;padding:4px 7px;cursor:pointer;font-size:13px;" title="Teilen">📤</button>
         ${r.own ? '<button onclick="openEditRecipe('+r.id+')" style="background:none;border:1px solid var(--bd);border-radius:8px;padding:4px 7px;cursor:pointer;font-size:13px;" title="Bearbeiten">✏️</button>' : ''}
         ${r.own ? '<button onclick="deleteRecipe('+r.id+')" style="background:none;border:1px solid var(--bd);border-radius:8px;padding:4px 7px;cursor:pointer;font-size:13px;color:var(--dn);" title="Löschen">🗑️</button>' : ''}
@@ -2981,39 +3090,129 @@ function renderRecipes(){
     </div>
     <div class="recipe-tags">${r.tags.map(t=>`<span class="recipe-tag">${t}</span>`).join('')}${r.source?`<span class="recipe-tag" style="background:rgba(59,130,246,.1);color:#2563eb;">🌐 ${r.source}</span>`:''}</div>
     <div class="recipe-ingredients">${r.ingredients.slice(0,4).join(' · ')}${r.ingredients.length>4?' …':''}</div>
-    <button class="recipe-btn" onclick="openRecipe(${r.id})">Rezept ansehen &amp; zur Liste hinzufügen</button>
+    <div style="display:flex;gap:6px;">
+      <button class="recipe-btn" onclick="openRecipe(${r.id})" style="flex:1;">Rezept ansehen &amp; zur Liste</button>
+      <button onclick="assignRecipeToDay(${r.id})" style="background:none;border:1px solid var(--bd);border-radius:8px;padding:6px 10px;cursor:pointer;font-size:13px;flex-shrink:0;" title="Zum Wochenplan">📅</button>
+    </div>
   </div>`).join('');
 }
 
-// ── SCHRITT 3: Wochenplan-Modal (kein prompt()) ──
-function assignMeal(day){
+// ── Wochenplan: Tag + Mahlzeit-Slot wählen ──
+var pendingMealSlot = 'mi'; // fr / mi / ab
+
+function assignMeal(day, slot){
+  slot = slot || 'mi';
   pendingMealDay = day;
-  const modal = document.getElementById('modal-mealplan');
-  document.getElementById('mealplan-day-title').textContent = 'Rezept für ' + day + ' wählen';
+  pendingMealSlot = slot;
+  if(!mealPlan[day]) mealPlan[day] = {fr:null,mi:null,ab:null};
+
+  const slotDef = MEAL_SLOTS.find(s=>s.id===slot) || MEAL_SLOTS[1];
+  const currentId = mealPlan[day][slot];
+
+  document.getElementById('mealplan-day-title').innerHTML =
+    '<span style="font-size:14px;">' + slotDef.icon + ' ' + slotDef.label + '</span>' +
+    '<span style="font-size:12px;color:var(--t2);margin-left:6px;">— ' + day + '</span>';
+
   document.getElementById('mealplan-recipe-list').innerHTML =
-    `<div onclick="setMealDay(null)" style="padding:10px 12px;border-bottom:0.5px solid var(--bd);font-size:13px;cursor:pointer;color:var(--dn);">✕ Kein Rezept (löschen)</div>` +
-    RECIPES.map(r=>`<div onclick="setMealDay(${r.id})" style="padding:10px 12px;border-bottom:0.5px solid var(--bd);cursor:pointer;display:flex;align-items:center;gap:10px;${mealPlan[day]===r.id?'background:var(--ac);':''}">
-      <div style="flex:1;">
-        <div style="font-size:13px;font-weight:500;color:var(--tx);">${r.title}${mealPlan[day]===r.id?' ✓':''}</div>
-        <div style="font-size:10px;color:var(--t2);">⏱ ${r.time} · ${r.tags.join(', ')}</div>
-      </div>
-    </div>`).join('');
-  modal.classList.add('open');
+    '<div onclick="setMealDay(null)" style="padding:10px 12px;border-bottom:0.5px solid var(--bd);font-size:13px;cursor:pointer;color:var(--dn);">✕ Kein Rezept (löschen)</div>' +
+    RECIPES.map(r=>{
+      const active = currentId===r.id;
+      return '<div onclick="setMealDay('+r.id+')" style="padding:10px 12px;border-bottom:0.5px solid var(--bd);cursor:pointer;display:flex;align-items:center;gap:10px;'+(active?'background:var(--ac);':'')+'">' +
+        '<div style="flex:1;">' +
+          '<div style="font-size:13px;font-weight:500;color:var(--tx);">'+r.title+(active?' ✓':'')+'</div>' +
+          '<div style="font-size:10px;color:var(--t2);">⏱ '+r.time+' · '+(r.tags||[]).slice(0,3).join(', ')+'</div>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+
+  document.getElementById('modal-mealplan').classList.add('open');
 }
+
 function setMealDay(recipeId){
-  if(pendingMealDay) mealPlan[pendingMealDay] = recipeId;
+  if(pendingMealDay){
+    if(!mealPlan[pendingMealDay]) mealPlan[pendingMealDay]={fr:null,mi:null,ab:null};
+    mealPlan[pendingMealDay][pendingMealSlot] = recipeId;
+  }
   closeM('modal-mealplan');
   renderRecipes();
   scheduleSave();
 }
 
+// Rezept direkt aus dem Rezept-Modal einem Wochentag + Mahlzeit zuweisen
+function assignRecipeToDay(recipeId){
+  const DAYS = ['Mo','Di','Mi','Do','Fr','Sa','So'];
+  const dayNames = ['Montag','Dienstag','Mittwoch','Donnerstag','Freitag','Samstag','Sonntag'];
+  const slots = MEAL_SLOTS;
+
+  // Build picker overlay
+  const existing = document.getElementById('quick-assign-overlay');
+  if(existing) existing.remove();
+
+  const ov = document.createElement('div');
+  ov.id = 'quick-assign-overlay';
+  ov.className = 'ov open';
+
+  const rows = DAYS.map((d,di)=>{
+    const dayPlan = mealPlan[d]||{fr:null,mi:null,ab:null};
+    const slotBtns = slots.map(sl=>{
+      const rid = dayPlan[sl.id];
+      const taken = rid && rid !== recipeId;
+      const isSet = rid === recipeId;
+      return '<button onclick="quickSetMeal(this.dataset.d,this.dataset.s,this.dataset.r)" '+
+        'data-d="'+d+'" data-s="'+sl.id+'" data-r="'+recipeId+'" style="'+
+        'flex:1;padding:6px 4px;border-radius:8px;font-size:11px;cursor:pointer;font-family:var(--fn);border:1px solid var(--bd);'+
+        (isSet?'background:var(--ap);color:#fff;':taken?'background:var(--ac);color:var(--t2);':'background:var(--sf);color:var(--tx);')+'">' +
+        sl.icon+'<br><span style="font-size:9px;">'+(isSet?'✓':taken?'belegt':'frei')+'</span>' +
+        '</button>';
+    }).join('');
+    return '<div style="display:flex;align-items:center;gap:6px;padding:6px 0;border-bottom:1px solid var(--ac);">'+
+      '<div style="width:36px;font-size:12px;font-weight:500;color:var(--tx);">'+d+'</div>'+
+      '<div style="display:flex;gap:4px;flex:1;">'+slotBtns+'</div>'+
+    '</div>';
+  }).join('');
+
+  ov.innerHTML = '<div class="modal" style="max-height:85vh;overflow-y:auto;">'+
+    '<h3 style="margin-bottom:4px;">📅 Wochenplan zuweisen</h3>'+
+    '<p style="font-size:11px;color:var(--t2);margin-bottom:12px;">Tippe auf 🌅 Frühstück · ☀️ Mittagessen · 🌙 Abendessen</p>'+
+    rows+
+    '<button class="mcanc" onclick="document.getElementById(\'quick-assign-overlay\').remove()" style="margin-top:12px;">Schließen</button>'+
+  '</div>';
+
+  ov.addEventListener('click', e=>{ if(e.target===ov) ov.remove(); });
+  document.body.appendChild(ov);
+}
+
+function quickSetMeal(day, slot, recipeId){
+  recipeId = parseInt(recipeId)||recipeId;
+  if(!mealPlan[day]) mealPlan[day]={fr:null,mi:null,ab:null};
+  // Toggle: wenn schon gesetzt → löschen
+  if(mealPlan[day][slot]===recipeId){
+    mealPlan[day][slot]=null;
+  } else {
+    mealPlan[day][slot]=recipeId;
+  }
+  scheduleSave();
+  renderRecipes();
+  // Refresh the overlay
+  const r = RECIPES.find(x=>x.id===recipeId);
+  if(r) assignRecipeToDay(recipeId);
+  const slotDef = MEAL_SLOTS.find(s=>s.id===slot);
+  const slotName = slotDef?slotDef.label:slot;
+  showToast(mealPlan[day][slot] ? '✓ '+day+' '+slotName+' gesetzt' : 'Entfernt');
+}
+
 function generateShoppingFromPlan(){
-  const planned=Object.values(mealPlan).filter(Boolean);
+  // Collect all recipe IDs from all slots
+  const planned=[];
+  Object.values(mealPlan).forEach(day=>{
+    if(!day) return;
+    Object.values(day).forEach(rid=>{ if(rid && !planned.includes(rid)) planned.push(rid); });
+  });
   if(!planned.length){showToast('Bitte zuerst Rezepte im Wochenplan zuweisen.',true);return;}
   const allIngredients=[];
   planned.forEach(rid=>{
     const r=RECIPES.find(x=>x.id===rid);
-    if(r)r.ingredients.forEach(ing=>allIngredients.push(ing));
+    if(r)(r.ingredients||[]).forEach(ing=>allIngredients.push(ing));
   });
   if(!S.stores.length)return;
   const store=S.stores[0];
@@ -3041,6 +3240,31 @@ function generateShoppingFromPlan(){
 // Trage hier deine Supabase Project URL ein:
 // ═══════════════════════════════════════
 var SUPABASE_PROXY_URL = 'https://dexzgptwbeypkwjhyovx.supabase.co/functions/v1/claude-proxy';
+
+// ── Robustes Kopieren: funktioniert auch auf file:// und HTTP ──
+function copyToClipboard(text, successMsg){
+  successMsg = successMsg || '✓ Kopiert!';
+  if(navigator.clipboard && window.isSecureContext){
+    navigator.clipboard.writeText(text)
+      .then(()=>showToast(successMsg))
+      .catch(()=>fallbackCopy(text, successMsg));
+  } else {
+    fallbackCopy(text, successMsg);
+  }
+}
+function fallbackCopy(text, successMsg){
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0;';
+    document.body.appendChild(ta);
+    ta.focus(); ta.select(); ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    showToast(ok ? successMsg : 'Bitte manuell kopieren', !ok);
+  } catch(e){ showToast('Bitte manuell kopieren', true); }
+}
+
 // Zentrale Funktion für alle KI-Aufrufe via Supabase Proxy
 async function callClaudeProxy(type, messages, maxTokens, system) {
   const response = await fetch(SUPABASE_PROXY_URL, {
@@ -3368,7 +3592,7 @@ async function shareRecipeNative(){
       return;
     } catch(e) { if(e.name==='AbortError') return; }
   }
-  navigator.clipboard.writeText(text).then(()=>showToast('✓ Rezept kopiert'));
+  copyToClipboard(text, '✓ Rezept kopiert');
 }
 
 function shareRecipeTo(channel){
@@ -3378,10 +3602,16 @@ function shareRecipeTo(channel){
   const enc = encodeURIComponent(text);
   switch(channel){
     case 'whatsapp':  window.open('https://wa.me/?text='+enc,'_blank'); break;
-    case 'telegram':  window.open('https://t.me/share/url?url='+encodeURIComponent(window.location.href.split('?')[0])+'&text='+enc,'_blank'); break;
+    case 'telegram':{
+      const _tgUrl = getAppShareUrl();
+      const _tgText = '🍽️ *'+r.title+'*\n⏱ '+r.time+' · 👤 '+r.persons+' Personen\n\n'+
+        '🥕 '+(r.ingredients||[]).slice(0,3).join(', ')+'...\n\n'+
+        '🛒 *ShopSmart* — Zutaten direkt auf die Liste:';
+      window.open('https://t.me/share/url?url='+encodeURIComponent(_tgUrl)+'&text='+encodeURIComponent(_tgText),'_blank');
+      break;}
     case 'facebook':  window.open('https://www.facebook.com/sharer/sharer.php?quote='+enc,'_blank'); break;
     case 'copy':
-      navigator.clipboard.writeText(text).then(()=>showToast('✓ Rezept kopiert'));
+      copyToClipboard(text, '✓ Rezept kopiert');
       return;
   }
   showToast('✓ Teilen-Fenster geöffnet');
@@ -4317,7 +4547,7 @@ function toggleDay(d){const i=S.reminderDays.indexOf(d);i>=0?S.reminderDays.spli
 // ═══════════════════════════════════════
 // SHARE
 // ═══════════════════════════════════════
-function copyLink(){navigator.clipboard.writeText('https://shopsmart.app/list/fam-xyz789').then(()=>showToast('✓ Link in die Zwischenablage kopiert')).catch(()=>showToast('Link kopieren fehlgeschlagen',true));}
+function copyLink(){copyToClipboard('https://shopsmart.app/list/fam-xyz789', '✓ Link kopiert');}
 function addMember(){
   showInputModal('👤 Mitglied hinzufügen','Name…','',(name)=>{
     if(!name.trim())return;
@@ -4799,7 +5029,7 @@ async function generateResteverwerterRecipe(){
 
     const data = await callClaudeProxy(
       'kitchen_chef',
-      [{ role:'user', content: prompt.join('\n') }],
+      [{ role:'user', content: prompt }],
       1200
     );
 
@@ -4882,14 +5112,18 @@ function rvReset(){
 // ═══════════════════════════════════════
 
 // ── App-URL: Produktions-URL hier eintragen sobald auf GitHub Pages gehostet ──
-var APP_PRODUCTION_URL = '[https://tamy8919.github.io/Shopsmart/](https://tamy8919.github.io/Shopsmart/)';
+var APP_PRODUCTION_URL = 'https://tamy8919.github.io/Shopsmart/';
 
 function getAppShareUrl(){
   const loc = window.location.href;
-  if(!loc.startsWith('file://') && !loc.includes('localhost')){
-    return loc.split('?')[0].split('#')[0];
+  if(loc.startsWith('file://') ||
+     loc.includes('localhost') ||
+     loc.includes('about:srcdoc') ||
+     loc.includes('about:blank') ||
+     loc.includes('127.0.0.1')){
+    return APP_PRODUCTION_URL;
   }
-  return APP_PRODUCTION_URL;
+  return loc.split('?')[0].split('#')[0];
 }
 
 function getAppShareText(platform){
@@ -4949,28 +5183,28 @@ function shareAppTo(channel){
     case 'whatsapp':
       window.open('https://wa.me/?text=' + encodeURIComponent(fullText), '_blank');
       break;
-    case 'telegram':
-      window.open('https://t.me/share/url?url=' + encodeURIComponent(url) + '&text=' + encodeURIComponent(text), '_blank');
-      break;
+    case 'telegram':{
+      const tgUrl = getAppShareUrl();
+      const tgText = getAppShareText('telegram');
+      window.open('https://t.me/share/url?url=' + encodeURIComponent(tgUrl) + '&text=' + encodeURIComponent(tgText), '_blank');
+      break;}
     case 'facebook':
       window.open('https://www.facebook.com/sharer/sharer.php?u=' + encodeURIComponent(url), '_blank');
       break;
     case 'email':
-      window.open('mailto:?subject=' + encodeURIComponent('ShopSmart — Einkaufsapp') + '&body=' + encodeURIComponent(fullText));
+      openMailtoLink('mailto:?subject=' + encodeURIComponent('ShopSmart — Einkaufsapp') + '&body=' + encodeURIComponent(fullText));
       break;
     case 'sms':
       window.open('sms:?body=' + encodeURIComponent(fullText));
       break;
     case 'instagram':
       // Instagram unterstützt kein direktes Link-Teilen via URL-Schema
-      navigator.clipboard.writeText(fullText).catch(()=>{});
+      copyToClipboard(fullText, '✓ Text kopiert');
       document.getElementById('instagram-hint').style.display = 'block';
       showToast('✓ Text kopiert — in Instagram einfügen');
       return;
     case 'copy':
-      navigator.clipboard.writeText(fullText)
-        .then(()=>showToast('✓ Link kopiert'))
-        .catch(()=>showToast('Kopieren fehlgeschlagen', true));
+      copyToClipboard(fullText, '✓ Link kopiert');
       return;
     case 'more':
       // Versuche nochmal die native API (z.B. wenn erst jetzt verfügbar)
@@ -5011,9 +5245,7 @@ function shareViaLink(){
 
 function copyShareLink(){
   if(!_shareUrl) return;
-  navigator.clipboard.writeText(_shareUrl)
-    .then(()=>showToast('✓ Link kopiert'))
-    .catch(()=>showToast('Kopieren fehlgeschlagen', true));
+  copyToClipboard(_shareUrl, '✓ Link kopiert');
 }
 
 function whatsappShare(){
@@ -5022,11 +5254,23 @@ function whatsappShare(){
   window.open('https://wa.me/?text=' + text, '_blank');
 }
 
+// Öffnet mailto: via temporäres <a>-Tag mit target=_blank
+// → verhindert weiße Seite auf Mobile/Desktop
+function openMailtoLink(href){
+  const a = document.createElement('a');
+  a.href = href;
+  a.target = '_blank';
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(()=>document.body.removeChild(a), 200);
+}
+
 function emailShare(){
   if(!_shareUrl) { shareViaLink(); return; }
   const subject = encodeURIComponent('ShopSmart — Einkaufsliste');
   const body = encodeURIComponent('Hier ist meine Einkaufsliste:\n\n' + _shareUrl);
-  window.open('mailto:?subject=' + subject + '&body=' + body);
+  openMailtoLink('mailto:?subject=' + subject + '&body=' + body);
 }
 
 // Beim Start: prüfen ob eine geteilte Liste in der URL steckt
