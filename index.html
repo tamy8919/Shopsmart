@@ -3269,7 +3269,11 @@ function fallbackCopy(text, successMsg){
 async function callClaudeProxy(type, messages, maxTokens, system) {
   const response = await fetch(SUPABASE_PROXY_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+   headers: { 
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer sb_publishable_zJsVqwtGA0866YEdPyeSxQ_Rclt4U7w',
+      'apikey': 'sb_publishable_zJsVqwtGA0866YEdPyeSxQ_Rclt4U7w'
+    },
     body: JSON.stringify({
       type: type,
       messages: messages,
