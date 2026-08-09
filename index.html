@@ -2454,35 +2454,20 @@ async function analyzeNutritionPhoto(input){
 
     const mediaType = file.type || 'image/jpeg';
 
-    // Claude API aufrufen
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 1000,
-        messages: [{
-          role: 'user',
-          content: [
-            {
-              type: 'image',
-              source: { type: 'base64', media_type: mediaType, data: base64 }
-            },
-            {
-              type: 'text',
-              text: 'Lies die Nährwerttabelle auf diesem Produktfoto aus. Antworte NUR mit einem JSON-Objekt (kein Text davor oder danach, keine Markdown-Backticks) in diesem Format: {"kcal":250,"protein":8.5,"fat":12.3,"carbs":30.1,"sugar":5.2,"salt":0.8,"fiber":3.1,"per":100}. Wenn ein Wert nicht sichtbar ist, setze null. "per" ist die Portionsgröße in g oder ml auf die sich die Werte beziehen (meistens 100).'
-            }
-          ]
-        }]
-      })
-    });
+    // Claude API via sicheren Supabase Proxy aufrufen
+    const proxyData = await callClaudeProxy(
+      'nutrition_scan',
+      [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
+          { type: 'text', text: 'Lies die Nährwerttabelle auf diesem Produktfoto aus. Antworte NUR mit einem JSON-Objekt (kein Text davor oder danach, keine Markdown-Backticks) in diesem Format: {"kcal":250,"protein":8.5,"fat":12.3,"carbs":30.1,"sugar":5.2,"salt":0.8,"fiber":3.1,"per":100}. Wenn ein Wert nicht sichtbar ist, setze null. "per" ist die Portionsgröße in g oder ml auf die sich die Werte beziehen (meistens 100).' }
+        ]
+      }],
+      1000
+    );
 
-    if(!response.ok){
-      throw new Error('API Fehler: ' + response.status);
-    }
-
-    const data = await response.json();
-    const text = data.content?.[0]?.text || '';
+    const text = (proxyData.content?.[0]?.text) || '';
 
     // JSON aus der Antwort extrahieren
     const clean = text.replace(/```json|```/g,'').trim();
@@ -3051,6 +3036,33 @@ function generateShoppingFromPlan(){
 // REZEPTE — Importieren / Erstellen / Teilen
 // ═══════════════════════════════════════
 
+// ═══════════════════════════════════════
+// SUPABASE PROXY — Claude API sicher aufrufen
+// Trage hier deine Supabase Project URL ein:
+// ═══════════════════════════════════════
+var SUPABASE_PROXY_URL = 'https://dexzgptwbeypkwjhyovx.supabase.co/functions/v1/claude-proxy';
+// Zentrale Funktion für alle KI-Aufrufe via Supabase Proxy
+async function callClaudeProxy(type, messages, maxTokens, system) {
+  const response = await fetch(SUPABASE_PROXY_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      type: type,
+      messages: messages,
+      max_tokens: maxTokens || 1500,
+      system: system || undefined
+    })
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data.error || 'Fehler beim Aufruf des KI-Dienstes');
+  }
+
+  return data;
+}
+
 var _importedRecipeData = null;
 var _editingRecipeId = null;
 var _sharingRecipeId = null;
@@ -3070,45 +3082,113 @@ async function importRecipeFromUrl(){
 
   const status = document.getElementById('import-recipe-status');
   const btn = document.getElementById('import-recipe-btn');
-  status.style.display = 'block';
-  status.style.background = 'var(--ac)';
-  status.style.color = 'var(--ap)';
-  status.textContent = '✨ Rezept wird geladen und analysiert…';
+
+  function setStatus(msg, color){
+    status.style.display = 'block';
+    status.style.background = color==='ok'?'rgba(34,197,94,.1)':color==='err'?'rgba(220,38,38,.1)':'var(--ac)';
+    status.style.color = color==='ok'?'#16a34a':color==='err'?'#dc2626':'var(--ap)';
+    status.textContent = msg;
+  }
+
+  setStatus('🌐 Seite wird geladen…', 'info');
   btn.disabled = true;
 
-  try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 1500,
-        messages: [{
-          role: 'user',
-          content: 'Besuche diese Rezept-URL und extrahiere das Rezept: ' + url + '\n\nAntworte NUR mit einem JSON-Objekt (kein Text, keine Backticks):\n{"title":"Rezeptname","time":"30 Min.","persons":4,"tags":["Pasta","Vegetarisch"],"ingredients":["500g Nudeln","2 EL Olivenöl"],"steps":"Schritt 1... Schritt 2...","source":"chefkoch.de"}\n\nWenn du die URL nicht abrufen kannst, versuche trotzdem ein plausibles Rezept basierend auf dem URL-Text zu erstellen.'
-        }]
-      })
-    });
+  // ── Schritt 1: HTML via CORS-Proxy laden (Best-effort) ──
+  let pageText = '';
+  const CORS_PROXIES = [
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+  ];
 
-    const data = await response.json();
-    const text = (data.content?.[0]?.text || '').replace(/```json|```/g,'').trim();
-    const recipe = JSON.parse(text);
+  for(const proxyUrl of CORS_PROXIES){
+    try {
+      const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(6000) });
+      if(!res.ok) continue;
+      const html = await res.text();
+      if(html.length < 300) continue;
+      // Bereinigen
+      pageText = html
+        .replace(/<script[\s\S]*?<\/script>/gi,'')
+        .replace(/<style[\s\S]*?<\/style>/gi,'')
+        .replace(/<[^>]+>/g,' ')
+        .replace(/&nbsp;/g,' ').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>')
+        .replace(/\s{3,}/g,'\n').trim().slice(0,8000);
+      if(pageText.length > 300) break;
+    } catch(e){ continue; }
+  }
+
+  // ── Schritt 2: KI aufrufen — mit oder ohne Seiteninhalt ──
+  setStatus('✨ KI analysiert das Rezept…', 'info');
+
+  // Hostname aus URL extrahieren (sicher)
+  let hostname = url;
+  try { hostname = new URL(url).hostname.replace('www.',''); } catch(e){}
+
+  // URL-Slug als Hinweis aufbereiten (z.B. "Haehnchen-Curry" → "Hähnchen Curry")
+  let urlHint = '';
+  try {
+    const parts = new URL(url).pathname.split('/').filter(Boolean);
+    urlHint = parts[parts.length-1]
+      .replace(/[-_]/g,' ').replace(/\d+/g,'').trim()
+      .replace(/\b\w/g, l=>l.toUpperCase());
+  } catch(e){}
+
+  const systemPrompt = 'Du bist ein Rezept-Extraktor. Antworte AUSSCHLIESSLICH mit einem JSON-Objekt, ohne Text davor oder danach, ohne Markdown-Backticks.';
+
+  let userContent;
+  if(pageText.length > 300){
+    userContent = 'Extrahiere das Rezept aus diesem Webseitentext von ' + hostname + ':\n\n' + pageText +
+      '\n\nJSON:\n{"title":"Name","time":"30 Min.","persons":4,"category":"hauptspeise",' +
+      '"tags":["Tag1"],"ingredients":["Zutat 1","Zutat 2"],"steps":"Schritt 1:\\nSchritt 2:","source":"' + hostname + '"}';
+  } else {
+    // Kein HTML geladen — URL direkt an Claude schicken
+    userContent = 'Leite aus den Begriffen und der Struktur dieser URL das passende Rezept ab und gib Titel, Zutatenliste und Zubereitung als strukturiertes JSON zurück.\n\n' +
+      'URL: ' + url + '\n' +
+      (urlHint ? 'Erkannter Rezeptname aus URL: "' + urlHint + '"\n' : '') +
+      'Quelle: ' + hostname + '\n\n' +
+      'JSON:\n{"title":"' + (urlHint||'Rezept') + '","time":"30 Min.","persons":4,"category":"hauptspeise",' +
+      '"tags":["Tag1"],"ingredients":["200g Zutat 1","1 EL Zutat 2"],"steps":"Schritt 1: ...\\nSchritt 2: ...","source":"' + hostname + '"}';
+  }
+
+  try {
+    const data = await callClaudeProxy('recipe_import', [{role:'user',content:userContent}], 1500, systemPrompt);
+    let text = (data.content?.[0]?.text||'').trim();
+
+    // JSON robust extrahieren
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if(!jsonMatch) throw new Error('Kein JSON');
+    const recipe = JSON.parse(jsonMatch[0]);
+
+    if(!recipe.title) throw new Error('Kein Titel');
+    recipe.ingredients = Array.isArray(recipe.ingredients)?recipe.ingredients:[];
+    recipe.tags = Array.isArray(recipe.tags)?recipe.tags:[];
+    recipe.steps = recipe.steps||'';
+    recipe.time = recipe.time||'?';
+    recipe.persons = Number(recipe.persons)||4;
+    recipe.source = recipe.source||hostname;
+    if(pageText.length < 300) recipe._aiGenerated = true;
 
     _importedRecipeData = recipe;
 
-    document.getElementById('import-preview-title').textContent = recipe.title || 'Unbekanntes Rezept';
-    document.getElementById('import-preview-meta').textContent = '⏱ ' + (recipe.time||'?') + ' · 👤 ' + (recipe.persons||4) + ' Personen · Quelle: ' + (recipe.source||url);
-    document.getElementById('import-preview-ingredients').textContent = '🥕 ' + (recipe.ingredients||[]).slice(0,5).join(', ') + (recipe.ingredients?.length > 5 ? ' …' : '');
+    document.getElementById('import-preview-title').textContent = recipe.title;
+    document.getElementById('import-preview-meta').textContent =
+      '⏱ '+recipe.time+' · 👤 '+recipe.persons+' Personen · 🌐 '+recipe.source+
+      (recipe._aiGenerated?' · ✨ KI-Vorschlag':'');
+    document.getElementById('import-preview-ingredients').textContent =
+      '🥕 '+recipe.ingredients.slice(0,5).join(', ')+(recipe.ingredients.length>5?' …':'');
     document.getElementById('import-recipe-preview').style.display = 'block';
 
-    status.style.background = 'rgba(34,197,94,.1)';
-    status.style.color = '#16a34a';
-    status.textContent = '✅ Rezept gefunden — bitte prüfen und speichern!';
+    setStatus(
+      recipe._aiGenerated
+        ? '✨ KI-Vorschlag erstellt (Seite nicht ladbar) — bitte prüfen!'
+        : '✅ Rezept importiert — bitte prüfen und speichern!',
+      'ok'
+    );
 
-  } catch(e) {
-    status.style.background = 'rgba(220,38,38,.1)';
-    status.style.color = '#dc2626';
-    status.textContent = '❌ Rezept konnte nicht geladen werden. Tipp: Versuche eine andere Rezept-Seite.';
+  } catch(e){
+    console.error('Recipe import error:', e);
+    setStatus('❌ ' + (e.message||'Fehler beim Importieren') + '. Bitte prüfe die Supabase Proxy-URL.', 'err');
   }
   btn.disabled = false;
 }
@@ -3232,17 +3312,50 @@ function shareRecipe(id){
   document.getElementById('modal-share-recipe').classList.add('open');
 }
 
-function buildRecipeShareText(){
+function buildRecipeShareText(platform){
   const r = RECIPES.find(x=>x.id===_sharingRecipeId);
   if(!r) return '';
-  const appUrl = window.location.href.split('?')[0];
-  return '🍽️ *' + r.title + '*\n' +
-    '⏱ ' + r.time + ' · 👤 ' + r.persons + ' Personen\n\n' +
-    '🥕 *Zutaten:*\n' + (r.ingredients||[]).map(i=>'• '+i).join('\n') + '\n\n' +
-    '👨‍🍳 *Zubereitung:*\n' + (r.steps||'') + '\n\n' +
-    '━━━━━━━━━━━━━━━\n' +
-    '🛒 Aus der *ShopSmart App* — alle Zutaten direkt auf die Einkaufsliste:\n' + appUrl;
+  const appUrl = getAppShareUrl();
+  const ingredients = (r.ingredients||[]).map(i=>'• '+i).join('\n');
+  const steps = (r.steps||'').split('\n').filter(Boolean).join('\n');
+
+  if(platform === 'telegram' || platform === 'whatsapp'){
+    // Markdown-Formatierung (fett mit *Sternchen*)
+    return '🍽️ *'+r.title+'*\n'+
+      '⏱ '+r.time+' · 👤 '+r.persons+' Personen\n\n'+
+      '🥕 *Zutaten:*\n'+ingredients+'\n\n'+
+      '👨‍🍳 *Zubereitung:*\n'+steps+'\n\n'+
+      '━━━━━━━━━━━━━━━\n'+
+      '🛒 Mit der *ShopSmart App* alle Zutaten auf einen Klick auf die Einkaufsliste:\n'+
+      '👉 '+appUrl;
+  }
+
+  if(platform === 'email'){
+    return r.title+'\n\n'+
+      'Zeit: '+r.time+' · Personen: '+r.persons+'\n\n'+
+      'ZUTATEN:\n'+ingredients+'\n\n'+
+      'ZUBEREITUNG:\n'+steps+'\n\n'+
+      '---\n'+
+      'Rezept geteilt mit ShopSmart — der smarten Einkaufsapp.\n'+
+      'Alle Zutaten direkt auf die Liste: '+appUrl;
+  }
+
+  if(platform === 'sms'){
+    // Kurz halten für SMS
+    return r.title+' ('+r.time+', '+r.persons+' Pers.)\n'+
+      (r.ingredients||[]).slice(0,4).join(', ')+' ...\n'+
+      '📱 Mehr in ShopSmart: '+appUrl;
+  }
+
+  // Standard / Kopieren / Facebook
+  return '🍽️ '+r.title+'\n'+
+    '⏱ '+r.time+' · 👤 '+r.persons+' Personen\n\n'+
+    '🥕 Zutaten:\n'+ingredients+'\n\n'+
+    '👨‍🍳 Zubereitung:\n'+steps+'\n\n'+
+    '━━━━━━━━━━━━━━━\n'+
+    '🛒 ShopSmart App — Zutaten direkt auf die Einkaufsliste:\n'+appUrl;
 }
+
 
 async function shareRecipeNative(){
   const r = RECIPES.find(x=>x.id===_sharingRecipeId);
@@ -4684,22 +4797,14 @@ async function generateResteverwerterRecipe(){
     '{"title":"'+( lang==='it'?'Nome ricetta':lang==='fr'?'Nom recette':lang==='es'?'Nombre receta':'Recipe name')+'","time":"25 Min.","persons":2,"category":"hauptspeise","tags":["'+( lang==='it'?'Veloce':lang==='fr'?'Rapide':lang==='es'?'Rápido':'Quick')+'","Resteverwertung"],"ingredients":["200g '+( lang==='it'?'pasta':lang==='fr'?'pâtes':lang==='es'?'pasta':'Nudeln')+'","1 '+( lang==='it'?'cipolla':lang==='fr'?'oignon':lang==='es'?'cebolla':'Zwiebel')+'"],"steps":"'+( lang==='it'?'Passo 1':lang==='fr'?'Étape 1':lang==='es'?'Paso 1':'Schritt 1')+': ...\\n'+( lang==='it'?'Passo 2':lang==='fr'?'Étape 2':lang==='es'?'Paso 2':'Schritt 2')+': ...","extras":["'+( extrasLabels[lang]||extrasLabels.de)+'"],"tip":"'+(tipLabels[lang]||tipLabels.de)+'"}'
   ].filter(Boolean).join('\n');
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 1200,
-        messages: [{ role:'user', content: prompt }]
-      })
-    });
+    const data = await callClaudeProxy(
+      'kitchen_chef',
+      [{ role:'user', content: prompt.join('\n') }],
+      1200
+    );
 
     clearInterval(loadingInterval);
-
-    if(!response.ok) throw new Error('API ' + response.status);
-
-    const data = await response.json();
-    const text = (data.content?.[0]?.text||'').replace(/```json|```/g,'').trim();
+    const text = (data.content?.[0]?.text || '').replace(/```json|```/g,'').trim();
     const recipe = JSON.parse(text);
     _rvGeneratedRecipe = recipe;
 
@@ -4776,15 +4881,37 @@ function rvReset(){
 // — alle Apps die auf dem Handy installiert sind)
 // ═══════════════════════════════════════
 
+// ── App-URL: Produktions-URL hier eintragen sobald auf GitHub Pages gehostet ──
+var APP_PRODUCTION_URL = '[https://tamy8919.github.io/Shopsmart/](https://tamy8919.github.io/Shopsmart/)';
+
 function getAppShareUrl(){
-  // Reine App-URL ohne ?liste= Parameter — damit die Person
-  // die App selbst öffnet, nicht eine geteilte Liste
-  return window.location.href.split('?')[0].split('#')[0];
+  const loc = window.location.href;
+  if(!loc.startsWith('file://') && !loc.includes('localhost')){
+    return loc.split('?')[0].split('#')[0];
+  }
+  return APP_PRODUCTION_URL;
 }
 
-function getAppShareText(){
-  return '🛒 Schau dir ShopSmart an — meine smarte Einkaufslisten-App! Gemeinsame Listen, Rezepte, Vorratskammer und mehr — direkt im Browser, keine Installation nötig:';
+function getAppShareText(platform){
+  const url = getAppShareUrl();
+  if(platform === 'telegram' || platform === 'whatsapp'){
+    return '🛒 *ShopSmart* — die smarte Einkaufsapp!\n\n'+
+      '✅ Einkaufslisten für alle Läden\n'+
+      '🏠 Vorratskammer mit KI-Küchenchef\n'+
+      '📖 Rezepte importieren & teilen\n'+
+      '👨‍👩‍👧 Echtzeit mit der Familie teilen\n\n'+
+      '👉 Kostenlos direkt im Browser:\n'+url;
+  }
+  if(platform === 'email'){
+    return 'Hallo!\n\nIch nutze ShopSmart und wollte dir die App empfehlen.\n\n'+
+      'ShopSmart ist eine kostenlose Einkaufsapp — Einkaufslisten, Vorratskammer, '+
+      'Rezepte und KI-Küchenchef alles in einer App, direkt im Browser ohne Installation.\n\n'+
+      'Hier geht\'s direkt zur App:\n'+url+'\n\nViel Spaß damit!';
+  }
+  return '🛒 ShopSmart — die smarte Einkaufsapp!\n'+
+    'Einkaufslisten, Vorratskammer, Rezepte & KI-Küchenchef — kostenlos:\n'+url;
 }
+
 
 async function shareAppNative(){
   const url = getAppShareUrl();
