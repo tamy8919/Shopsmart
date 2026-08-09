@@ -3267,12 +3267,15 @@ function fallbackCopy(text, successMsg){
 
 // Zentrale Funktion für alle KI-Aufrufe via Supabase Proxy
 async function callClaudeProxy(type, messages, maxTokens, system) {
+  const SUPABASE_PROXY_URL = 'https://dexzgptwbeypkwjhyovx.supabase.co/functions/v1/claude-proxy';
+  const SUPABASE_ANON_KEY  = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRleHpncHR3YmV5cGt3amh5b3Z4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODYxOTM1MzYsImV4cCI6MjEwMTc2OTUzNn0.PbsQCdjo_hNtwPtSttyVRDvyoRx8na51geu-k2SH4b4';
+
   const response = await fetch(SUPABASE_PROXY_URL, {
     method: 'POST',
-   headers: { 
+    headers: { 
       'Content-Type': 'application/json',
-      'Authorization': 'Bearer sb_publishable_zJsVqwtGA0866YEdPyeSxQ_Rclt4U7w',
-      'apikey': 'sb_publishable_zJsVqwtGA0866YEdPyeSxQ_Rclt4U7w'
+      'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+      'apikey': SUPABASE_ANON_KEY
     },
     body: JSON.stringify({
       type: type,
@@ -3290,7 +3293,6 @@ async function callClaudeProxy(type, messages, maxTokens, system) {
 
   return data;
 }
-
 var _importedRecipeData = null;
 var _editingRecipeId = null;
 var _sharingRecipeId = null;
