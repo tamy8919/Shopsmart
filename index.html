@@ -521,6 +521,8 @@ html, body { height:100%; background:#0d1a10; }
 .sett-sec:hover .sett-grip, .sett-sec:active .sett-grip { color:var(--ap); }
 .sett-sortable-ghost { opacity:.4; background:var(--ac) !important; border:2px dashed var(--ap) !important; }
 .sett-sortable-drag { box-shadow:0 8px 24px rgba(0,0,0,.15); transform:scale(1.02); }
+@keyframes shake { 0%,100%{transform:translateX(0)} 25%{transform:translateX(-6px)} 75%{transform:translateX(6px)} }
+.shake { animation: shake .4s ease; }
 #settings-sortable { overflow:visible; }
 </style>
 </head>
@@ -1251,6 +1253,53 @@ function showPaywall(mode){
   if(btnCancel) btnCancel.textContent={de:'Abbrechen',en:'Cancel',it:'Annulla',fr:'Annuler',es:'Cancelar'}[lang];
   ov.classList.add('open');
 }
+
+// ── Pro Gutschein-Code einlösen ──
+const PRO_COUPON_CODES = ['TESTPRO1981', 'DEVMODE'];
+
+async function redeemProCoupon(){
+  const lang = (typeof S !== 'undefined' ? S.lang : null)||'de';
+  const inp  = document.getElementById('paywall-coupon-inp');
+  const msg  = document.getElementById('paywall-coupon-msg');
+  const code = (inp ? inp.value.trim().toUpperCase() : '');
+
+  if(!code){
+    if(msg) msg.textContent = {de:'Bitte Code eingeben.',en:'Please enter a code.',it:'Inserisci un codice.',fr:'Entrez un code.',es:'Introduce un código.'}[lang];
+    return;
+  }
+
+  if(!PRO_COUPON_CODES.includes(code)){
+    if(msg) msg.style.color = 'var(--dn)';
+    if(msg) msg.textContent = {de:'❌ Ungültiger Code.',en:'❌ Invalid code.',it:'❌ Codice non valido.',fr:'❌ Code invalide.',es:'❌ Código inválido.'}[lang];
+    if(inp) inp.classList.add('shake');
+    setTimeout(()=>{ if(inp) inp.classList.remove('shake'); }, 500);
+    return;
+  }
+
+  // ── Code gültig — Pro aktivieren ──
+  if(msg) msg.style.color = '#22c55e';
+  if(msg) msg.textContent = '⏳ '+{de:'Wird aktiviert…',en:'Activating…',it:'Attivazione…',fr:'Activation…',es:'Activando…'}[lang];
+
+  // Versuche Supabase user_metadata zu setzen (falls eingeloggt)
+  if(_supabase && _authUser){
+    try {
+      await _supabase.auth.updateUser({ data: { is_pro: true } });
+    } catch(e){ console.warn('Supabase update failed:', e); }
+  }
+
+  // Immer lokal setzen (funktioniert auch ohne Netz)
+  _isPro = true;
+  _authUser = _authUser || { email:'test@devmode.local', user_metadata:{is_pro:true} };
+  _updateAccountUI();
+
+  setTimeout(()=>{
+    closeM('modal-paywall');
+    showToast('🎉 '+{de:'Pro aktiviert! Viel Spaß beim Testen.',en:'Pro activated! Enjoy testing.',it:'Pro attivato! Buon test.',fr:'Pro activé! Bonne exploration.',es:'¡Pro activado! A disfrutar.'}[lang]);
+    if(inp) inp.value = '';
+    if(msg) msg.textContent = '';
+  }, 800);
+}
+
 
 function openProCheckout(){
   closeM('modal-paywall');
@@ -6217,6 +6266,17 @@ if(savedRoom){
       <div style="display:flex;align-items:center;gap:10px;font-size:13px;color:var(--tx);"><span style="color:#22c55e;">✓</span> KI-Kassenbon-Analyse</div>
     </div>
   </div>
+  <!-- Gutschein-Code -->
+  <div style="display:flex;gap:8px;margin-bottom:10px;">
+    <input id="paywall-coupon-inp" class="modal-inp" placeholder="Gutscheincode eingeben…"
+      style="flex:1;margin-bottom:0;font-family:monospace;letter-spacing:1px;text-transform:uppercase;"
+      oninput="this.value=this.value.toUpperCase()"
+      onkeydown="if(event.key==='Enter')redeemProCoupon()">
+    <button onclick="redeemProCoupon()" class="mconf"
+      style="padding:10px 14px;margin:0;flex-shrink:0;">✓</button>
+  </div>
+  <div id="paywall-coupon-msg" style="font-size:12px;min-height:16px;margin-bottom:10px;"></div>
+
   <button id="paywall-btn-main" class="mconf" style="background:linear-gradient(135deg,#f59e0b,#d97706);border:none;">✦ Jetzt Pro freischalten</button>
   <button id="paywall-btn-cancel" class="mcanc" onclick="closeM('modal-paywall')">Abbrechen</button>
 </div>
